@@ -1,5 +1,5 @@
 # MCP-сервер для поиска товаров на складах поставщиков
-# Версия 1.0.1
+# Версия 1.0.2
 
 from flask import Flask, request, jsonify
 import json
@@ -8,11 +8,15 @@ import pandas as pd
 import io
 import time
 import threading
-import re
 from datetime import datetime
 from xml.etree import ElementTree as ET
 import os
 import sys
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', stream=sys.stdout)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -42,14 +46,14 @@ def load_tatarenko():
     """Загружает прайс-лист ИП Татаренко из XLS"""
     items = []
     try:
-        print("   📂 Открываем файл tatarenko_2026-02-11.xls...", flush=True)
+        logger.info("📥 Загрузка ИП Татаренко...")
+        logger.info("   📂 Открываем файл tatarenko_2026-02-11.xls...")
         with open('tatarenko_2026-02-11.xls', 'rb') as f:
             file_content = f.read()
         
-        print("   📊 Читаем Excel...", flush=True)
+        logger.info("   📊 Читаем Excel...")
         df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None)
         
-        # Ищем начало таблицы (строка с "Товар")
         start_row = None
         for i, row in df.iterrows():
             if 'Товар' in str(row.values):
@@ -61,14 +65,12 @@ def load_tatarenko():
             for i in range(start_row, len(df)):
                 row = df.iloc[i]
                 
-                # Проверяем, не заголовок ли это категории
                 col_a = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
                 
                 if "Бирюса" in col_a and len(col_a) > 10:
                     current_category = col_a
                     continue
                 
-                # Пропускаем пустые строки
                 if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
                     continue
                 
@@ -76,7 +78,6 @@ def load_tatarenko():
                 specs = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
                 color = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
                 
-                # Цены (колонки E, F, G = индексы 4, 5, 6)
                 retail_price = None
                 wholesale_price = None
                 
@@ -99,12 +100,12 @@ def load_tatarenko():
         
         CACHE["tatarenko"] = items
         CACHE["last_update"]["tatarenko"] = datetime.now().isoformat()
-        print(f"   ✅ ИП Татаренко: загружено {len(items)} товаров", flush=True)
+        logger.info(f"   ✅ ИП Татаренко: загружено {len(items)} товаров")
         
     except Exception as e:
-        print(f"   ❌ Ошибка загрузки ИП Татаренко: {e}", flush=True)
+        logger.error(f"   ❌ Ошибка загрузки ИП Татаренко: {e}")
         import traceback
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
 
 # ============================================================
 # ЗАГРУЗКА PARTNERS GROUP
@@ -117,7 +118,8 @@ def load_partners():
         config = [s for s in CONFIG["suppliers"] if s["id"] == "partners_group"][0]
         auth = config["auth"]
         
-        print("   🔑 Авторизация в Partners Group...", flush=True)
+        logger.info("📥 Загрузка Partners Group...")
+        logger.info("   🔑 Авторизация...")
         auth_resp = requests.post(
             config["api_url"],
             json={
@@ -136,10 +138,10 @@ def load_partners():
         
         session = auth_resp.json().get("session")
         if not session:
-            print("   ❌ Partners Group: не удалось получить сессию", flush=True)
+            logger.error("   ❌ Partners Group: не удалось получить сессию")
             return
         
-        print("   📥 Скачивание каталога Partners Group...", flush=True)
+        logger.info("   📥 Скачивание каталога...")
         catalog_resp = requests.get(
             f"https://b2b.i-t-p.pro/download/catalog/json/products_9.json",
             cookies={"session": session},
@@ -162,10 +164,10 @@ def load_partners():
         
         CACHE["partners"] = items
         CACHE["last_update"]["partners"] = datetime.now().isoformat()
-        print(f"   ✅ Partners Group: загружено {len(items)} товаров", flush=True)
+        logger.info(f"   ✅ Partners Group: загружено {len(items)} товаров")
         
     except Exception as e:
-        print(f"   ❌ Ошибка загрузки Partners Group: {e}", flush=True)
+        logger.error(f"   ❌ Ошибка загрузки Partners Group: {e}")
 
 # ============================================================
 # ЗАГРУЗКА MERLION
@@ -191,7 +193,8 @@ def load_merlion():
             </SOAP-ENV:Body>
         </SOAP-ENV:Envelope>"""
         
-        print("   📡 Запрос к Merlion API...", flush=True)
+        logger.info("📥 Загрузка Merlion...")
+        logger.info("   📡 Запрос к API...")
         response = requests.post(
             config["wsdl_url"],
             data=soap_request,
@@ -220,10 +223,10 @@ def load_merlion():
         
         CACHE["merlion"] = items
         CACHE["last_update"]["merlion"] = datetime.now().isoformat()
-        print(f"   ✅ Merlion: загружено {len(items)} товаров", flush=True)
+        logger.info(f"   ✅ Merlion: загружено {len(items)} товаров")
         
     except Exception as e:
-        print(f"   ❌ Ошибка загрузки Merlion: {e}", flush=True)
+        logger.error(f"   ❌ Ошибка загрузки Merlion: {e}")
 
 # ============================================================
 # ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
@@ -314,7 +317,7 @@ def mcp_handler():
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "warehouse-search",
-                    "version": "1.0.1"
+                    "version": "1.0.2"
                 }
             }
         })
@@ -444,52 +447,45 @@ def health():
     })
 
 # ============================================================
-# ФОНОВОЕ ОБНОВЛЕНИЕ КЕША
+# ЗАПУСК ЗАГРУЗКИ КЕША (вызывается извне)
 # ============================================================
 
+def initialize_cache():
+    """Инициализация кеша при старте"""
+    logger.info("=" * 50)
+    logger.info("🚀 MCP-сервер поиска по складам")
+    logger.info("=" * 50)
+    
+    load_tatarenko()
+    load_partners()
+    load_merlion()
+    
+    logger.info("=" * 50)
+    logger.info(f"📊 ИТОГО в кеше:")
+    logger.info(f"   ИП Татаренко: {len(CACHE['tatarenko'])} товаров")
+    logger.info(f"   Partners Group: {len(CACHE['partners'])} товаров")
+    logger.info(f"   Merlion: {len(CACHE['merlion'])} товаров")
+    logger.info("=" * 50)
+
+# Запускаем инициализацию при импорте
+initialize_cache()
+
+# Фоновое обновление
 def update_cache():
-    """Обновление кеша (запускается при старте и раз в сутки)"""
     while True:
-        print("\n🔄 Обновление кеша поставщиков...", flush=True)
+        time.sleep(24 * 60 * 60)
+        logger.info("🔄 Плановое обновление кеша...")
         load_tatarenko()
         load_partners()
         load_merlion()
-        print("✅ Обновление завершено\n", flush=True)
-        time.sleep(24 * 60 * 60)
+
+threading.Thread(target=update_cache, daemon=True).start()
 
 # ============================================================
 # ЗАПУСК
 # ============================================================
 
 if __name__ == '__main__':
-    print("🚀 MCP-сервер поиска по складам", flush=True)
-    print("=" * 50, flush=True)
-    
-    # Загружаем ИП Татаренко
-    print("📥 Загрузка ИП Татаренко...", flush=True)
-    load_tatarenko()
-    print(f"   Готово: {len(CACHE['tatarenko'])} товаров", flush=True)
-    
-    # Загружаем Partners Group
-    print("📥 Загрузка Partners Group...", flush=True)
-    try:
-        load_partners()
-        print(f"   Готово: {len(CACHE['partners'])} товаров", flush=True)
-    except Exception as e:
-        print(f"   ❌ Ошибка: {e}", flush=True)
-    
-    # Загружаем Merlion
-    print("📥 Загрузка Merlion...", flush=True)
-    try:
-        load_merlion()
-        print(f"   Готово: {len(CACHE['merlion'])} товаров", flush=True)
-    except Exception as e:
-        print(f"   ❌ Ошибка: {e}", flush=True)
-    
-    print("=" * 50, flush=True)
-    print(f"🌐 Сервер запущен на порту {os.environ.get('PORT', 5001)}", flush=True)
-    
-    # Запускаем фоновое обновление
-    threading.Thread(target=update_cache, daemon=True).start()
-    
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5001)))
+    port = int(os.environ.get('PORT', 5001))
+    logger.info(f"🌐 Сервер запущен на порту {port}")
+    app.run(host='0.0.0.0', port=port)
