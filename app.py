@@ -1,5 +1,5 @@
 # MCP-сервер для поиска товаров на складах поставщиков
-# Версия 1.0.3 (облегчённая)
+# Версия 1.0.4 (с отладкой)
 
 from flask import Flask, request, jsonify
 import json
@@ -37,11 +37,11 @@ CACHE = {
 }
 
 # ============================================================
-# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО (облегчённая)
+# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО (с отладкой)
 # ============================================================
 
 def load_tatarenko():
-    """Загружает прайс-лист ИП Татаренко из XLS (экономим память)"""
+    """Загружает прайс-лист ИП Татаренко из XLS"""
     items = []
     try:
         logger.info("📥 Загрузка ИП Татаренко...")
@@ -52,32 +52,61 @@ def load_tatarenko():
         logger.info("   📊 Читаем Excel...")
         df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='xlrd')
         
+        # ОТЛАДКА: показываем первые 30 строк
+        logger.info("   🔍 ПЕРВЫЕ 30 СТРОК ФАЙЛА:")
+        for i in range(min(30, len(df))):
+            row = df.iloc[i]
+            first_cells = []
+            for j in range(min(8, len(row))):
+                cell = row.iloc[j]
+                if pd.notna(cell):
+                    val = str(cell)[:40]
+                    first_cells.append(val)
+                else:
+                    first_cells.append("")
+            logger.info(f"      {i}: {first_cells}")
+        
+        # Ищем строку-заголовок с "Товар"
         start_row = None
         for i, row in df.iterrows():
-            if 'Товар' in str(row.values):
+            row_str = str(row.values)
+            if 'Товар' in row_str:
+                logger.info(f"   🎯 Найдена строка 'Товар': {i}")
                 start_row = i + 2
                 break
         
+        if not start_row:
+            # Пробуем найти "Наименование"
+            for i, row in df.iterrows():
+                row_str = str(row.values)
+                if 'Наименование' in row_str:
+                    logger.info(f"   🎯 Найдена строка 'Наименование': {i}")
+                    start_row = i + 1
+                    break
+        
         if start_row:
+            logger.info(f"   📋 Начинаем парсинг со строки {start_row}")
             current_category = ""
+            
             for i in range(start_row, len(df)):
                 row = df.iloc[i]
                 
-                col_a = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
+                # Первая ячейка
+                col_a = str(row.iloc[0]) if len(row) > 0 and pd.notna(row.iloc[0]) else ""
                 
+                # Проверяем, не заголовок ли это категории
                 if "Бирюса" in col_a and len(col_a) > 10:
                     current_category = col_a
                     continue
                 
-                if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "":
+                # Пропускаем пустые строки
+                if col_a.strip() == "" or col_a == "nan":
                     continue
                 
-                name = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
-                
-                if name and "Бирюса" in name:
-                    # Сохраняем только нужные поля
+                # Проверяем, что это товар (содержит "Бирюса")
+                if "Бирюса" in col_a:
                     item = {
-                        "name": name,
+                        "name": col_a,
                         "category": current_category,
                         "source": "ИП Татаренко Т.С.",
                         "supplier_id": "tatarenko"
@@ -88,13 +117,17 @@ def load_tatarenko():
                     if len(items) >= 500:
                         logger.info("   ⚠️ Достигнут лимит 500 товаров")
                         break
-        
-        CACHE["tatarenko"] = items
-        CACHE["last_update"]["tatarenko"] = datetime.now().isoformat()
-        logger.info(f"   ✅ ИП Татаренко: загружено {len(items)} товаров")
+            
+            CACHE["tatarenko"] = items
+            CACHE["last_update"]["tatarenko"] = datetime.now().isoformat()
+            logger.info(f"   ✅ ИП Татаренко: загружено {len(items)} товаров")
+        else:
+            logger.error("   ❌ Не найдена строка-заголовок с 'Товар' или 'Наименование'")
         
     except Exception as e:
         logger.error(f"   ❌ Ошибка: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 # ============================================================
 # ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
@@ -183,7 +216,7 @@ def mcp_handler():
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "warehouse-search",
-                    "version": "1.0.3"
+                    "version": "1.0.4"
                 }
             }
         })
@@ -312,7 +345,7 @@ def health():
 def initialize_cache():
     """Инициализация кеша"""
     logger.info("=" * 50)
-    logger.info("🚀 MCP-сервер поиска по складам v1.0.3")
+    logger.info("🚀 MCP-сервер поиска по складам v1.0.4")
     logger.info("=" * 50)
     
     load_tatarenko()
