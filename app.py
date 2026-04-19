@@ -1,5 +1,5 @@
 # MCP-сервер для поиска товаров на складах поставщиков
-# Версия 1.0.2
+# Версия 1.0.3 (облегчённая)
 
 from flask import Flask, request, jsonify
 import json
@@ -9,13 +9,11 @@ import io
 import time
 import threading
 from datetime import datetime
-from xml.etree import ElementTree as ET
 import os
-import sys
 import logging
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', stream=sys.stdout)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -39,11 +37,11 @@ CACHE = {
 }
 
 # ============================================================
-# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО
+# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО (облегчённая)
 # ============================================================
 
 def load_tatarenko():
-    """Загружает прайс-лист ИП Татаренко из XLS"""
+    """Загружает прайс-лист ИП Татаренко из XLS (экономим память)"""
     items = []
     try:
         logger.info("📥 Загрузка ИП Татаренко...")
@@ -52,7 +50,7 @@ def load_tatarenko():
             file_content = f.read()
         
         logger.info("   📊 Читаем Excel...")
-        df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None)
+        df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='xlrd')
         
         start_row = None
         for i, row in df.iterrows():
@@ -75,165 +73,35 @@ def load_tatarenko():
                     continue
                 
                 name = str(row.iloc[0]) if pd.notna(row.iloc[0]) else ""
-                specs = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
-                color = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
-                
-                retail_price = None
-                wholesale_price = None
-                
-                if len(row) > 6:
-                    retail_price = row.iloc[4] if pd.notna(row.iloc[4]) else None
-                    wholesale_price = row.iloc[6] if pd.notna(row.iloc[6]) else row.iloc[5] if pd.notna(row.iloc[5]) else None
                 
                 if name and "Бирюса" in name:
+                    # Сохраняем только нужные поля
                     item = {
                         "name": name,
-                        "specs": specs,
-                        "color": color,
                         "category": current_category,
-                        "retail_price": float(retail_price) if retail_price and isinstance(retail_price, (int, float)) else None,
-                        "wholesale_price": float(wholesale_price) if wholesale_price and isinstance(wholesale_price, (int, float)) else None,
                         "source": "ИП Татаренко Т.С.",
                         "supplier_id": "tatarenko"
                     }
                     items.append(item)
+                    
+                    # Ограничиваем для экономии памяти
+                    if len(items) >= 500:
+                        logger.info("   ⚠️ Достигнут лимит 500 товаров")
+                        break
         
         CACHE["tatarenko"] = items
         CACHE["last_update"]["tatarenko"] = datetime.now().isoformat()
         logger.info(f"   ✅ ИП Татаренко: загружено {len(items)} товаров")
         
     except Exception as e:
-        logger.error(f"   ❌ Ошибка загрузки ИП Татаренко: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-
-# ============================================================
-# ЗАГРУЗКА PARTNERS GROUP
-# ============================================================
-
-def load_partners():
-    """Загружает каталог Partners Group через API"""
-    items = []
-    try:
-        config = [s for s in CONFIG["suppliers"] if s["id"] == "partners_group"][0]
-        auth = config["auth"]
-        
-        logger.info("📥 Загрузка Partners Group...")
-        logger.info("   🔑 Авторизация...")
-        auth_resp = requests.post(
-            config["api_url"],
-            json={
-                "request": {
-                    "method": "login",
-                    "model": "auth",
-                    "module": "quickfox"
-                },
-                "data": {
-                    "login": auth["login"],
-                    "password": auth["password"]
-                }
-            },
-            timeout=30
-        )
-        
-        session = auth_resp.json().get("session")
-        if not session:
-            logger.error("   ❌ Partners Group: не удалось получить сессию")
-            return
-        
-        logger.info("   📥 Скачивание каталога...")
-        catalog_resp = requests.get(
-            f"https://b2b.i-t-p.pro/download/catalog/json/products_9.json",
-            cookies={"session": session},
-            timeout=60
-        )
-        
-        products = catalog_resp.json()
-        
-        for p in products:
-            item = {
-                "name": p.get("name", ""),
-                "vendor": p.get("vendor", ""),
-                "part": p.get("part", ""),
-                "sku": p.get("sku"),
-                "category": p.get("category"),
-                "source": "Partners Group",
-                "supplier_id": "partners_group"
-            }
-            items.append(item)
-        
-        CACHE["partners"] = items
-        CACHE["last_update"]["partners"] = datetime.now().isoformat()
-        logger.info(f"   ✅ Partners Group: загружено {len(items)} товаров")
-        
-    except Exception as e:
-        logger.error(f"   ❌ Ошибка загрузки Partners Group: {e}")
-
-# ============================================================
-# ЗАГРУЗКА MERLION
-# ============================================================
-
-def load_merlion():
-    """Загружает каталог Merlion через SOAP API"""
-    items = []
-    try:
-        config = [s for s in CONFIG["suppliers"] if s["id"] == "merlion"][0]
-        auth = config["auth"]
-        
-        soap_request = f"""<?xml version="1.0" encoding="UTF-8"?>
-        <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">
-            <SOAP-ENV:Body>
-                <getItems xmlns="https://api.merlion.com/dl/mlservice3">
-                    <cat_id></cat_id>
-                    <item_id></item_id>
-                    <shipment_method></shipment_method>
-                    <page>0</page>
-                    <rows_on_page>1000</rows_on_page>
-                </getItems>
-            </SOAP-ENV:Body>
-        </SOAP-ENV:Envelope>"""
-        
-        logger.info("📥 Загрузка Merlion...")
-        logger.info("   📡 Запрос к API...")
-        response = requests.post(
-            config["wsdl_url"],
-            data=soap_request,
-            headers={"Content-Type": "text/xml"},
-            auth=(auth["login"], auth["password"]),
-            timeout=60
-        )
-        
-        root = ET.fromstring(response.content)
-        namespaces = {'ns': 'https://api.merlion.com/dl/mlservice3'}
-        
-        for item_elem in root.findall('.//item', namespaces):
-            name_elem = item_elem.find('.//Name', namespaces)
-            brand_elem = item_elem.find('.//Brand', namespaces)
-            part_elem = item_elem.find('.//Vendor_part', namespaces)
-            
-            if name_elem is not None:
-                item = {
-                    "name": name_elem.text or "",
-                    "vendor": brand_elem.text if brand_elem is not None else "",
-                    "part": part_elem.text if part_elem is not None else "",
-                    "source": "Merlion",
-                    "supplier_id": "merlion"
-                }
-                items.append(item)
-        
-        CACHE["merlion"] = items
-        CACHE["last_update"]["merlion"] = datetime.now().isoformat()
-        logger.info(f"   ✅ Merlion: загружено {len(items)} товаров")
-        
-    except Exception as e:
-        logger.error(f"   ❌ Ошибка загрузки Merlion: {e}")
+        logger.error(f"   ❌ Ошибка: {e}")
 
 # ============================================================
 # ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
 # ============================================================
 
 def search_in_cache(keywords, region=None):
-    """Поиск товаров по ключевым словам с учётом приоритетов"""
+    """Поиск товаров по ключевым словам"""
     
     keywords_lower = [k.lower() for k in keywords if k]
     if not keywords_lower:
@@ -249,7 +117,7 @@ def search_in_cache(keywords, region=None):
         items = CACHE.get(supplier_id, [])
         
         for item in items:
-            search_text = f"{item.get('name', '')} {item.get('specs', '')} {item.get('vendor', '')} {item.get('category', '')}".lower()
+            search_text = f"{item.get('name', '')} {item.get('category', '')}".lower()
             
             matched = []
             for kw in keywords_lower:
@@ -268,7 +136,7 @@ def search_in_cache(keywords, region=None):
     return all_results
 
 def get_suppliers_by_priority(context):
-    """Возвращает поставщиков, отсортированных по приоритету для контекста"""
+    """Возвращает поставщиков по приоритету"""
     suppliers = CONFIG["suppliers"]
     result = []
     
@@ -278,16 +146,14 @@ def get_suppliers_by_priority(context):
         for rule in s["priority"].get("rules", []):
             condition = rule["condition"]
             field = condition["field"]
-            operator = condition["operator"]
             value = condition["value"]
             
             context_value = context.get(field)
             if context_value:
-                if operator == "in":
-                    ctx_norm = context_value.lower().replace(" область", "").replace(" край", "")
-                    val_norm = [v.lower().replace(" область", "").replace(" край", "") for v in value]
-                    if ctx_norm in val_norm:
-                        priority = rule["priority"]
+                ctx_norm = context_value.lower().replace(" область", "").replace(" край", "")
+                val_norm = [v.lower().replace(" область", "").replace(" край", "") for v in value]
+                if ctx_norm in val_norm:
+                    priority = rule["priority"]
         
         result.append({
             "id": s["id"],
@@ -317,7 +183,7 @@ def mcp_handler():
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "warehouse-search",
-                    "version": "1.0.2"
+                    "version": "1.0.3"
                 }
             }
         })
@@ -330,7 +196,7 @@ def mcp_handler():
                 "tools": [
                     {
                         "name": "search_warehouses",
-                        "description": "Поиск товаров на складах поставщиков по ключевым словам",
+                        "description": "Поиск товаров на складах по ключевым словам",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -343,7 +209,7 @@ def mcp_handler():
                     },
                     {
                         "name": "get_cache_status",
-                        "description": "Получить статус кеша поставщиков",
+                        "description": "Статус кеша",
                         "inputSchema": {"type": "object", "properties": {}}
                     }
                 ]
@@ -375,12 +241,6 @@ def mcp_handler():
                 
                 item = {
                     "name": r.get("name"),
-                    "specs": r.get("specs"),
-                    "color": r.get("color"),
-                    "vendor": r.get("vendor"),
-                    "part_number": r.get("part"),
-                    "retail_price": r.get("retail_price"),
-                    "wholesale_price": r.get("wholesale_price"),
                     "matched_keywords": r.get("matched_keywords", []),
                     "match_count": r.get("match_count", 0)
                 }
@@ -398,7 +258,6 @@ def mcp_handler():
                             "found": len(results) > 0,
                             "total_found": len(results),
                             "search_keywords": all_keywords,
-                            "region": region,
                             "suppliers": grouped_list
                         }, ensure_ascii=False, indent=2)
                     }]
@@ -447,45 +306,26 @@ def health():
     })
 
 # ============================================================
-# ЗАПУСК ЗАГРУЗКИ КЕША (вызывается извне)
+# ЗАПУСК
 # ============================================================
 
 def initialize_cache():
-    """Инициализация кеша при старте"""
+    """Инициализация кеша"""
     logger.info("=" * 50)
-    logger.info("🚀 MCP-сервер поиска по складам")
+    logger.info("🚀 MCP-сервер поиска по складам v1.0.3")
     logger.info("=" * 50)
     
     load_tatarenko()
-    load_partners()
-    load_merlion()
     
     logger.info("=" * 50)
     logger.info(f"📊 ИТОГО в кеше:")
     logger.info(f"   ИП Татаренко: {len(CACHE['tatarenko'])} товаров")
-    logger.info(f"   Partners Group: {len(CACHE['partners'])} товаров")
-    logger.info(f"   Merlion: {len(CACHE['merlion'])} товаров")
     logger.info("=" * 50)
 
-# Запускаем инициализацию при импорте
+# Инициализация
 initialize_cache()
-
-# Фоновое обновление
-def update_cache():
-    while True:
-        time.sleep(24 * 60 * 60)
-        logger.info("🔄 Плановое обновление кеша...")
-        load_tatarenko()
-        load_partners()
-        load_merlion()
-
-threading.Thread(target=update_cache, daemon=True).start()
-
-# ============================================================
-# ЗАПУСК
-# ============================================================
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
-    logger.info(f"🌐 Сервер запущен на порту {port}")
+    logger.info(f"🌐 Сервер на порту {port}")
     app.run(host='0.0.0.0', port=port)
