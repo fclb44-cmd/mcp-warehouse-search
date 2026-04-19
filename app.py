@@ -1,9 +1,8 @@
 # MCP-сервер для поиска товаров на складах поставщиков
-# Версия 1.0.4 (с отладкой)
+# Версия 1.0.5 (исправлен парсинг Excel)
 
 from flask import Flask, request, jsonify
 import json
-import requests
 import pandas as pd
 import io
 import time
@@ -12,7 +11,6 @@ from datetime import datetime
 import os
 import logging
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -37,7 +35,7 @@ CACHE = {
 }
 
 # ============================================================
-# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО (с отладкой)
+# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО (ИСПРАВЛЕНО)
 # ============================================================
 
 def load_tatarenko():
@@ -45,89 +43,82 @@ def load_tatarenko():
     items = []
     try:
         logger.info("📥 Загрузка ИП Татаренко...")
-        logger.info("   📂 Открываем файл tatarenko_2026-02-11.xls...")
         with open('tatarenko_2026-02-11.xls', 'rb') as f:
             file_content = f.read()
         
-        logger.info("   📊 Читаем Excel...")
         df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='xlrd')
         
-        # ОТЛАДКА: показываем первые 30 строк
-        logger.info("   🔍 ПЕРВЫЕ 30 СТРОК ФАЙЛА:")
-        for i in range(min(30, len(df))):
-            row = df.iloc[i]
-            first_cells = []
-            for j in range(min(8, len(row))):
-                cell = row.iloc[j]
-                if pd.notna(cell):
-                    val = str(cell)[:40]
-                    first_cells.append(val)
-                else:
-                    first_cells.append("")
-            logger.info(f"      {i}: {first_cells}")
-        
-        # Ищем строку-заголовок с "Товар"
+        # Ищем строку с "Товар"
         start_row = None
         for i, row in df.iterrows():
-            row_str = str(row.values)
-            if 'Товар' in row_str:
-                logger.info(f"   🎯 Найдена строка 'Товар': {i}")
-                start_row = i + 2
+            if 'Товар' in str(row.values):
+                start_row = i + 2  # +2 потому что после заголовка ещё подзаголовки
                 break
         
-        if not start_row:
-            # Пробуем найти "Наименование"
-            for i, row in df.iterrows():
-                row_str = str(row.values)
-                if 'Наименование' in row_str:
-                    logger.info(f"   🎯 Найдена строка 'Наименование': {i}")
-                    start_row = i + 1
-                    break
-        
         if start_row:
-            logger.info(f"   📋 Начинаем парсинг со строки {start_row}")
+            logger.info(f"   📋 Парсинг со строки {start_row}")
             current_category = ""
             
             for i in range(start_row, len(df)):
                 row = df.iloc[i]
                 
-                # Первая ячейка
-                col_a = str(row.iloc[0]) if len(row) > 0 and pd.notna(row.iloc[0]) else ""
+                # Название в колонке 1 (индекс 1)
+                name = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
                 
-                # Проверяем, не заголовок ли это категории
-                if "Бирюса" in col_a and len(col_a) > 10:
-                    current_category = col_a
+                # Проверяем, не заголовок ли категории (в колонке 1)
+                if "Бирюса -" in name or "БИРЮСА -" in name:
+                    current_category = name
                     continue
                 
-                # Пропускаем пустые строки
-                if col_a.strip() == "" or col_a == "nan":
+                # Пропускаем пустые
+                if name.strip() == "" or name == "nan":
                     continue
                 
-                # Проверяем, что это товар (содержит "Бирюса")
-                if "Бирюса" in col_a:
+                # Проверяем, что это товар
+                if "Бирюса" in name or "БИРЮСА" in name:
+                    # Характеристики в колонке 2
+                    specs = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
+                    # Цвет/исполнение в колонке 3
+                    color = str(row.iloc[3]) if len(row) > 3 and pd.notna(row.iloc[3]) else ""
+                    # Розничная цена в колонке 4
+                    retail_price = None
+                    if len(row) > 4 and pd.notna(row.iloc[4]):
+                        try:
+                            retail_price = float(row.iloc[4])
+                        except:
+                            pass
+                    # Оптовая цена в колонке 6
+                    wholesale_price = None
+                    if len(row) > 6 and pd.notna(row.iloc[6]):
+                        try:
+                            wholesale_price = float(row.iloc[6])
+                        except:
+                            pass
+                    
                     item = {
-                        "name": col_a,
+                        "name": name,
+                        "specs": specs,
+                        "color": color,
                         "category": current_category,
+                        "retail_price": retail_price,
+                        "wholesale_price": wholesale_price,
                         "source": "ИП Татаренко Т.С.",
                         "supplier_id": "tatarenko"
                     }
                     items.append(item)
                     
-                    # Ограничиваем для экономии памяти
-                    if len(items) >= 500:
-                        logger.info("   ⚠️ Достигнут лимит 500 товаров")
+                    if len(items) >= 1000:
+                        logger.info("   ⚠️ Лимит 1000 товаров")
                         break
             
             CACHE["tatarenko"] = items
             CACHE["last_update"]["tatarenko"] = datetime.now().isoformat()
             logger.info(f"   ✅ ИП Татаренко: загружено {len(items)} товаров")
         else:
-            logger.error("   ❌ Не найдена строка-заголовок с 'Товар' или 'Наименование'")
+            logger.error("   ❌ Не найдена строка 'Товар'")
         
     except Exception as e:
         logger.error(f"   ❌ Ошибка: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
 
 # ============================================================
 # ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
@@ -135,7 +126,6 @@ def load_tatarenko():
 
 def search_in_cache(keywords, region=None):
     """Поиск товаров по ключевым словам"""
-    
     keywords_lower = [k.lower() for k in keywords if k]
     if not keywords_lower:
         return []
@@ -150,7 +140,7 @@ def search_in_cache(keywords, region=None):
         items = CACHE.get(supplier_id, [])
         
         for item in items:
-            search_text = f"{item.get('name', '')} {item.get('category', '')}".lower()
+            search_text = f"{item.get('name', '')} {item.get('specs', '')} {item.get('category', '')}".lower()
             
             matched = []
             for kw in keywords_lower:
@@ -165,7 +155,6 @@ def search_in_cache(keywords, region=None):
                 all_results.append(item_copy)
     
     all_results.sort(key=lambda x: (x.get("supplier_priority", 99), -x.get("match_count", 0)))
-    
     return all_results
 
 def get_suppliers_by_priority(context):
@@ -216,7 +205,7 @@ def mcp_handler():
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "warehouse-search",
-                    "version": "1.0.4"
+                    "version": "1.0.5"
                 }
             }
         })
@@ -229,7 +218,7 @@ def mcp_handler():
                 "tools": [
                     {
                         "name": "search_warehouses",
-                        "description": "Поиск товаров на складах по ключевым словам",
+                        "description": "Поиск товаров на складах по ключевым словам. Приоритет: ИП Татаренко (Иркутская, Новосибирская обл.) → Partners Group → Merlion.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -274,6 +263,10 @@ def mcp_handler():
                 
                 item = {
                     "name": r.get("name"),
+                    "specs": r.get("specs"),
+                    "color": r.get("color"),
+                    "retail_price": r.get("retail_price"),
+                    "wholesale_price": r.get("wholesale_price"),
                     "matched_keywords": r.get("matched_keywords", []),
                     "match_count": r.get("match_count", 0)
                 }
@@ -343,22 +336,19 @@ def health():
 # ============================================================
 
 def initialize_cache():
-    """Инициализация кеша"""
     logger.info("=" * 50)
-    logger.info("🚀 MCP-сервер поиска по складам v1.0.4")
+    logger.info("🚀 MCP-сервер v1.0.5")
     logger.info("=" * 50)
     
     load_tatarenko()
     
     logger.info("=" * 50)
-    logger.info(f"📊 ИТОГО в кеше:")
-    logger.info(f"   ИП Татаренко: {len(CACHE['tatarenko'])} товаров")
+    logger.info(f"📊 ИТОГО: {len(CACHE['tatarenko'])} товаров")
     logger.info("=" * 50)
 
-# Инициализация
 initialize_cache()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
-    logger.info(f"🌐 Сервер на порту {port}")
+    logger.info(f"🌐 Порт {port}")
     app.run(host='0.0.0.0', port=port)
