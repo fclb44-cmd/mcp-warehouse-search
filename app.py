@@ -1,5 +1,5 @@
 # MCP-сервер для поиска товаров на складах поставщиков
-# Версия 1.0.0
+# Версия 1.0.1
 
 from flask import Flask, request, jsonify
 import json
@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from xml.etree import ElementTree as ET
 import os
+import sys
 
 app = Flask(__name__)
 
@@ -21,9 +22,6 @@ app = Flask(__name__)
 
 with open('suppliers_config.json', 'r', encoding='utf-8') as f:
     CONFIG = json.load(f)
-
-with open('tatarenko_2026-02-11.xls', 'rb') as f:
-    TATARENKO_FILE = f.read()
 
 # ============================================================
 # КЕШ В ПАМЯТИ
@@ -44,7 +42,12 @@ def load_tatarenko():
     """Загружает прайс-лист ИП Татаренко из XLS"""
     items = []
     try:
-        df = pd.read_excel(io.BytesIO(TATARENKO_FILE), sheet_name=0, header=None)
+        print("   📂 Открываем файл tatarenko_2026-02-11.xls...", flush=True)
+        with open('tatarenko_2026-02-11.xls', 'rb') as f:
+            file_content = f.read()
+        
+        print("   📊 Читаем Excel...", flush=True)
+        df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None)
         
         # Ищем начало таблицы (строка с "Товар")
         start_row = None
@@ -96,10 +99,12 @@ def load_tatarenko():
         
         CACHE["tatarenko"] = items
         CACHE["last_update"]["tatarenko"] = datetime.now().isoformat()
-        print(f"✅ ИП Татаренко: загружено {len(items)} товаров")
+        print(f"   ✅ ИП Татаренко: загружено {len(items)} товаров", flush=True)
         
     except Exception as e:
-        print(f"❌ Ошибка загрузки ИП Татаренко: {e}")
+        print(f"   ❌ Ошибка загрузки ИП Татаренко: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
 
 # ============================================================
 # ЗАГРУЗКА PARTNERS GROUP
@@ -112,7 +117,7 @@ def load_partners():
         config = [s for s in CONFIG["suppliers"] if s["id"] == "partners_group"][0]
         auth = config["auth"]
         
-        # Авторизация
+        print("   🔑 Авторизация в Partners Group...", flush=True)
         auth_resp = requests.post(
             config["api_url"],
             json={
@@ -131,10 +136,10 @@ def load_partners():
         
         session = auth_resp.json().get("session")
         if not session:
-            print("❌ Partners Group: не удалось получить сессию")
+            print("   ❌ Partners Group: не удалось получить сессию", flush=True)
             return
         
-        # Получение каталога
+        print("   📥 Скачивание каталога Partners Group...", flush=True)
         catalog_resp = requests.get(
             f"https://b2b.i-t-p.pro/download/catalog/json/products_9.json",
             cookies={"session": session},
@@ -157,10 +162,10 @@ def load_partners():
         
         CACHE["partners"] = items
         CACHE["last_update"]["partners"] = datetime.now().isoformat()
-        print(f"✅ Partners Group: загружено {len(items)} товаров")
+        print(f"   ✅ Partners Group: загружено {len(items)} товаров", flush=True)
         
     except Exception as e:
-        print(f"❌ Ошибка загрузки Partners Group: {e}")
+        print(f"   ❌ Ошибка загрузки Partners Group: {e}", flush=True)
 
 # ============================================================
 # ЗАГРУЗКА MERLION
@@ -186,6 +191,7 @@ def load_merlion():
             </SOAP-ENV:Body>
         </SOAP-ENV:Envelope>"""
         
+        print("   📡 Запрос к Merlion API...", flush=True)
         response = requests.post(
             config["wsdl_url"],
             data=soap_request,
@@ -194,7 +200,6 @@ def load_merlion():
             timeout=60
         )
         
-        # Простой парсинг XML (извлекаем названия)
         root = ET.fromstring(response.content)
         namespaces = {'ns': 'https://api.merlion.com/dl/mlservice3'}
         
@@ -215,10 +220,10 @@ def load_merlion():
         
         CACHE["merlion"] = items
         CACHE["last_update"]["merlion"] = datetime.now().isoformat()
-        print(f"✅ Merlion: загружено {len(items)} товаров")
+        print(f"   ✅ Merlion: загружено {len(items)} товаров", flush=True)
         
     except Exception as e:
-        print(f"❌ Ошибка загрузки Merlion: {e}")
+        print(f"   ❌ Ошибка загрузки Merlion: {e}", flush=True)
 
 # ============================================================
 # ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
@@ -231,7 +236,6 @@ def search_in_cache(keywords, region=None):
     if not keywords_lower:
         return []
     
-    # Определяем приоритеты поставщиков для региона
     context = {"region": region} if region else {}
     suppliers_sorted = get_suppliers_by_priority(context)
     
@@ -242,10 +246,8 @@ def search_in_cache(keywords, region=None):
         items = CACHE.get(supplier_id, [])
         
         for item in items:
-            # Текст для поиска
             search_text = f"{item.get('name', '')} {item.get('specs', '')} {item.get('vendor', '')} {item.get('category', '')}".lower()
             
-            # Подсчёт совпадений
             matched = []
             for kw in keywords_lower:
                 if kw in search_text:
@@ -258,7 +260,6 @@ def search_in_cache(keywords, region=None):
                 item_copy["supplier_priority"] = supplier.get("_priority", 99)
                 all_results.append(item_copy)
     
-    # Сортировка: сначала по приоритету поставщика, потом по количеству совпадений
     all_results.sort(key=lambda x: (x.get("supplier_priority", 99), -x.get("match_count", 0)))
     
     return all_results
@@ -271,7 +272,6 @@ def get_suppliers_by_priority(context):
     for s in suppliers:
         priority = s["priority"]["default"]
         
-        # Проверяем правила
         for rule in s["priority"].get("rules", []):
             condition = rule["condition"]
             field = condition["field"]
@@ -305,7 +305,6 @@ def mcp_handler():
     method = data.get('method')
     request_id = data.get('id')
     
-    # ========== initialize ==========
     if method == 'initialize':
         return jsonify({
             "jsonrpc": "2.0",
@@ -315,12 +314,11 @@ def mcp_handler():
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "warehouse-search",
-                    "version": "1.0.0"
+                    "version": "1.0.1"
                 }
             }
         })
     
-    # ========== tools/list ==========
     elif method == 'tools/list':
         return jsonify({
             "jsonrpc": "2.0",
@@ -329,23 +327,13 @@ def mcp_handler():
                 "tools": [
                     {
                         "name": "search_warehouses",
-                        "description": "Поиск товаров на складах поставщиков по ключевым словам. Приоритет: ИП Татаренко (для Иркутской и Новосибирской обл.) → Partners Group → Merlion.",
+                        "description": "Поиск товаров на складах поставщиков по ключевым словам",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "equipment_type": {
-                                    "type": "string",
-                                    "description": "Тип оборудования (холодильник, стиральная машина и т.д.)"
-                                },
-                                "keywords": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "Ключевые слова для поиска"
-                                },
-                                "region": {
-                                    "type": "string",
-                                    "description": "Регион поставки (для определения приоритета)"
-                                }
+                                "equipment_type": {"type": "string"},
+                                "keywords": {"type": "array", "items": {"type": "string"}},
+                                "region": {"type": "string"}
                             },
                             "required": ["equipment_type", "keywords"]
                         }
@@ -353,16 +341,12 @@ def mcp_handler():
                     {
                         "name": "get_cache_status",
                         "description": "Получить статус кеша поставщиков",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {}
-                        }
+                        "inputSchema": {"type": "object", "properties": {}}
                     }
                 ]
             }
         })
     
-    # ========== tools/call ==========
     elif method == 'tools/call':
         params = data.get('params', {})
         tool_name = params.get('name')
@@ -373,13 +357,9 @@ def mcp_handler():
             keywords = arguments.get('keywords', [])
             region = arguments.get('region')
             
-            # Добавляем тип оборудования в ключевые слова
             all_keywords = [equipment_type] + keywords
-            
-            # Поиск
             results = search_in_cache(all_keywords, region)
             
-            # Группируем по поставщикам
             grouped = {}
             for r in results[:30]:
                 supplier_id = r.get("supplier_id")
@@ -403,7 +383,6 @@ def mcp_handler():
                 }
                 grouped[supplier_id]["items"].append(item)
             
-            # Сортируем группы по приоритету
             grouped_list = sorted(grouped.values(), key=lambda x: x.get("priority", 99))
             
             return jsonify({
@@ -471,13 +450,11 @@ def health():
 def update_cache():
     """Обновление кеша (запускается при старте и раз в сутки)"""
     while True:
-        print("\n🔄 Обновление кеша поставщиков...")
+        print("\n🔄 Обновление кеша поставщиков...", flush=True)
         load_tatarenko()
         load_partners()
         load_merlion()
-        print("✅ Обновление завершено\n")
-        
-        # Следующее обновление через 24 часа
+        print("✅ Обновление завершено\n", flush=True)
         time.sleep(24 * 60 * 60)
 
 # ============================================================
@@ -485,19 +462,34 @@ def update_cache():
 # ============================================================
 
 if __name__ == '__main__':
-    print("🚀 MCP-сервер поиска по складам")
-    print("=" * 50)
+    print("🚀 MCP-сервер поиска по складам", flush=True)
+    print("=" * 50, flush=True)
     
-    # Загружаем ИП Татаренко сразу (из файла)
+    # Загружаем ИП Татаренко
+    print("📥 Загрузка ИП Татаренко...", flush=True)
     load_tatarenko()
+    print(f"   Готово: {len(CACHE['tatarenko'])} товаров", flush=True)
     
-    # Partners Group и Merlion — в фоне (могут занять время)
-    threading.Thread(target=load_partners, daemon=True).start()
-    threading.Thread(target=load_merlion, daemon=True).start()
+    # Загружаем Partners Group
+    print("📥 Загрузка Partners Group...", flush=True)
+    try:
+        load_partners()
+        print(f"   Готово: {len(CACHE['partners'])} товаров", flush=True)
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}", flush=True)
     
-    # Периодическое обновление
+    # Загружаем Merlion
+    print("📥 Загрузка Merlion...", flush=True)
+    try:
+        load_merlion()
+        print(f"   Готово: {len(CACHE['merlion'])} товаров", flush=True)
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}", flush=True)
+    
+    print("=" * 50, flush=True)
+    print(f"🌐 Сервер запущен на порту {os.environ.get('PORT', 5001)}", flush=True)
+    
+    # Запускаем фоновое обновление
     threading.Thread(target=update_cache, daemon=True).start()
     
-    port = int(os.environ.get('PORT', 5001))
-    print(f"\n🌐 Сервер запущен на порту {port}")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5001)))
