@@ -1,0 +1,48 @@
+{
+  "suppliers": [
+    {
+      "id": "tatarenko",
+      "name": "ИП Татаренко Т.С.",
+      "type": "local_price",
+      "priority": {
+        "default": 5,
+        "rules": [
+          {
+            "condition": {
+              "field": "region",
+              "operator": "in",
+              "value": ["Иркутская область", "Новосибирская область"]
+            },
+            "priority": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "partners_group",
+      "name": "Partners Group",
+      "type": "api_jsonrpc",
+      "api_url": "https://b2b.i-t-p.pro/api/2",
+      "auth": {
+        "login": "9195399197",
+        "password": "9195399197"
+      },
+      "priority": {
+        "default": 2
+      }
+    },
+    {
+      "id": "merlion",
+      "name": "Merlion",
+      "type": "api_soap",
+      "wsdl_url": "https://api.merlion.com/dl/mlservice3?wsdl",
+      "auth": {
+        "login": "TC0078967|НН2026",
+        "password": "Tkbctq14Tkbctq14"
+      },
+      "priority": {
+        "default": 3
+      }
+    }
+  ]
+}
