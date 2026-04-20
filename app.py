@@ -1,16 +1,16 @@
 # MCP-сервер для поиска товаров на складах поставщиков
-# Версия 1.0.5 (исправлен парсинг Excel)
+# Версия 2.0.0 — совместимость с GPTunnel
 
 from flask import Flask, request, jsonify
 import json
 import pandas as pd
 import io
-import time
-import threading
-from datetime import datetime
 import os
 import logging
+import time
+from datetime import datetime
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ CACHE = {
 }
 
 # ============================================================
-# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО (ИСПРАВЛЕНО)
+# ЗАГРУЗКА ПРАЙС-ЛИСТА ИП ТАТАРЕНКО
 # ============================================================
 
 def load_tatarenko():
@@ -48,46 +48,37 @@ def load_tatarenko():
         
         df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='xlrd')
         
-        # Ищем строку с "Товар"
         start_row = None
         for i, row in df.iterrows():
             if 'Товар' in str(row.values):
-                start_row = i + 2  # +2 потому что после заголовка ещё подзаголовки
+                start_row = i + 2
                 break
         
         if start_row:
-            logger.info(f"   📋 Парсинг со строки {start_row}")
             current_category = ""
-            
             for i in range(start_row, len(df)):
                 row = df.iloc[i]
                 
-                # Название в колонке 1 (индекс 1)
                 name = str(row.iloc[1]) if len(row) > 1 and pd.notna(row.iloc[1]) else ""
                 
-                # Проверяем, не заголовок ли категории (в колонке 1)
                 if "Бирюса -" in name or "БИРЮСА -" in name:
                     current_category = name
                     continue
                 
-                # Пропускаем пустые
                 if name.strip() == "" or name == "nan":
                     continue
                 
-                # Проверяем, что это товар
                 if "Бирюса" in name or "БИРЮСА" in name:
-                    # Характеристики в колонке 2
                     specs = str(row.iloc[2]) if len(row) > 2 and pd.notna(row.iloc[2]) else ""
-                    # Цвет/исполнение в колонке 3
                     color = str(row.iloc[3]) if len(row) > 3 and pd.notna(row.iloc[3]) else ""
-                    # Розничная цена в колонке 4
+                    
                     retail_price = None
                     if len(row) > 4 and pd.notna(row.iloc[4]):
                         try:
                             retail_price = float(row.iloc[4])
                         except:
                             pass
-                    # Оптовая цена в колонке 6
+                    
                     wholesale_price = None
                     if len(row) > 6 and pd.notna(row.iloc[6]):
                         try:
@@ -108,17 +99,14 @@ def load_tatarenko():
                     items.append(item)
                     
                     if len(items) >= 1000:
-                        logger.info("   ⚠️ Лимит 1000 товаров")
                         break
             
             CACHE["tatarenko"] = items
             CACHE["last_update"]["tatarenko"] = datetime.now().isoformat()
             logger.info(f"   ✅ ИП Татаренко: загружено {len(items)} товаров")
-        else:
-            logger.error("   ❌ Не найдена строка 'Товар'")
         
     except Exception as e:
-        logger.error(f"   ❌ Ошибка: {e}")
+        logger.error(f"   ❌ Ошибка загрузки ИП Татаренко: {e}")
 
 # ============================================================
 # ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ
@@ -158,7 +146,6 @@ def search_in_cache(keywords, region=None):
     return all_results
 
 def get_suppliers_by_priority(context):
-    """Возвращает поставщиков по приоритету"""
     suppliers = CONFIG["suppliers"]
     result = []
     
@@ -187,16 +174,25 @@ def get_suppliers_by_priority(context):
     return result
 
 # ============================================================
-# MCP ЭНДПОИНТ
+# MCP ЭНДПОИНТ (ИСПРАВЛЕНО ДЛЯ GPTUNNEL)
 # ============================================================
 
 @app.route('/mcp', methods=['POST'])
 def mcp_handler():
+    # Логируем входящий запрос
+    logger.info("=" * 50)
+    logger.info("📨 MCP ЗАПРОС ПОЛУЧЕН")
+    
     data = request.json
     method = data.get('method')
     request_id = data.get('id')
     
+    logger.info(f"   Метод: {method}")
+    logger.info(f"   ID: {request_id}")
+    
+    # ========== initialize ==========
     if method == 'initialize':
+        logger.info("   ✅ initialize")
         return jsonify({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -205,12 +201,14 @@ def mcp_handler():
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "warehouse-search",
-                    "version": "1.0.5"
+                    "version": "2.0.0"
                 }
             }
         })
     
+    # ========== tools/list ==========
     elif method == 'tools/list':
+        logger.info("   ✅ tools/list")
         return jsonify({
             "jsonrpc": "2.0",
             "id": request_id,
@@ -218,7 +216,7 @@ def mcp_handler():
                 "tools": [
                     {
                         "name": "search_warehouses",
-                        "description": "Поиск товаров на складах по ключевым словам. Приоритет: ИП Татаренко (Иркутская, Новосибирская обл.) → Partners Group → Merlion.",
+                        "description": "Поиск товаров на складах поставщиков по ключевым словам. Приоритет: ИП Татаренко (Иркутская, Новосибирская обл.) → Partners Group → Merlion.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -231,17 +229,21 @@ def mcp_handler():
                     },
                     {
                         "name": "get_cache_status",
-                        "description": "Статус кеша",
+                        "description": "Получить статус кеша поставщиков",
                         "inputSchema": {"type": "object", "properties": {}}
                     }
                 ]
             }
         })
     
+    # ========== tools/call ==========
     elif method == 'tools/call':
         params = data.get('params', {})
         tool_name = params.get('name')
         arguments = params.get('arguments', {})
+        
+        logger.info(f"   Инструмент: {tool_name}")
+        logger.info(f"   Аргументы: {json.dumps(arguments, ensure_ascii=False)[:200]}")
         
         if tool_name == 'search_warehouses':
             equipment_type = arguments.get('equipment_type', '')
@@ -250,6 +252,8 @@ def mcp_handler():
             
             all_keywords = [equipment_type] + keywords
             results = search_in_cache(all_keywords, region)
+            
+            logger.info(f"   🔍 Найдено товаров: {len(results)}")
             
             grouped = {}
             for r in results[:30]:
@@ -284,6 +288,7 @@ def mcp_handler():
                             "found": len(results) > 0,
                             "total_found": len(results),
                             "search_keywords": all_keywords,
+                            "region": region,
                             "suppliers": grouped_list
                         }, ensure_ascii=False, indent=2)
                     }]
@@ -309,11 +314,14 @@ def mcp_handler():
                     }]
                 }
             })
+        
+        logger.warning(f"   ⚠️ Неизвестный инструмент: {tool_name}")
     
+    logger.warning(f"   ❌ Метод не найден: {method}")
     return jsonify({
         "jsonrpc": "2.0",
         "id": request_id,
-        "error": {"code": -32601, "message": "Method not found"}
+        "error": {"code": -32601, "message": f"Method not found: {method}"}
     })
 
 # ============================================================
@@ -337,7 +345,7 @@ def health():
 
 def initialize_cache():
     logger.info("=" * 50)
-    logger.info("🚀 MCP-сервер v1.0.5")
+    logger.info("🚀 MCP-сервер v2.0.0 (совместим с GPTunnel)")
     logger.info("=" * 50)
     
     load_tatarenko()
@@ -350,5 +358,5 @@ initialize_cache()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
-    logger.info(f"🌐 Порт {port}")
+    logger.info(f"🌐 Сервер на порту {port}")
     app.run(host='0.0.0.0', port=port)
